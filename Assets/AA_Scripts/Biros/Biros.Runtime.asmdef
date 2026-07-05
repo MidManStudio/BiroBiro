@@ -1,0 +1,20 @@
+{
+    "name": "Biros.Runtime",
+    "rootNamespace": "Biros",
+    "references": [
+        "MidManStudio.Utilities",
+        "MidManStudio.Netcode",
+        "Unity.Netcode.Runtime",
+        "Unity.InputSystem",
+        "Cinemachine"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

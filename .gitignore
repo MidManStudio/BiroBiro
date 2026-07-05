@@ -1,0 +1,85 @@
+/[Ex]ternal/
+/[Ll]ibrary/
+/[Tt]emp/
+/[Oo]bj/
+/[Bb]uild/
+/[Bb]uilds/
+/[Mm]emoryCaptures/
+/[Mm]emoryProfiler/
+/[Ll]ogs/
+/[Vv]alidationSuite/
+
+# Asset server cache
+/[Aa]ssetDataWorkspace/
+
+# Never ignore text meta files associated with omitted files
+!/[Keep]Me.meta
+
+# Crashlytics generated file
+sysinfo.txt
+
+# Builds
+*.apk
+*.aab
+*.unitypackage
+*.app
+
+# ----------
+# Crash Reports
+# ----------
+/[Cc]rash[[Rr]eports]/
+
+# ----------
+# Package Manager
+# ----------
+# Crashlytics
+Crashlytics~
+
+# ----------
+# IDEs and Editors
+# ----------
+/[Ee]xtensions/
+.vs/
+.gradle/
+*.csproj
+*.unityproj
+*.sln
+*.suo
+*.tmp
+*.user
+*.userprefs
+*.pidb
+*.booproj
+*.svd
+*.pdb
+*.opendb
+*.VC.db
+
+# Unity source generated resumes
+*.pidb.meta
+*.pdb.meta
+*.msc
+
+# Assembly folders
+/[Aa]ssembly-CSharp.csproj
+/[Aa]ssembly-CSharp-Editor.csproj
+/[Aa]ssembly-CSharp-firstpass.csproj
+/[Aa]ssembly-CSharp-Editor-firstpass.csproj
+
+# Rider
+.idea/
+*.sln.iml
+
+# VS Code
+.vscode/
+
+# ----------
+# OS Generated
+# ----------
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
