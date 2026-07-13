@@ -132,6 +132,16 @@ namespace Biros.Core
             _turnTimer.Stop();
             ServerTransitionTo(MatchPhase.ExecuteFlick);
         }
+        /// <summary>
+/// Called by PenController when the player commits a rotation as their move.
+/// Skips SimulatePhysics entirely — pen stays put, turn advances.
+/// </summary>
+public void ServerNotifyRotateSubmitted()
+{
+    if (!IsServer || _phase.Value != MatchPhase.ActiveTurnInput) return;
+    _turnTimer.Stop();
+    ServerTransitionTo(MatchPhase.SwitchPlayer);
+}
 
         /// <summary>
         /// Called by PenController when a pen falls out of bounds.
