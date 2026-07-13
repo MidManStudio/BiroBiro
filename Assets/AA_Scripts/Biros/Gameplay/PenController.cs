@@ -1,38 +1,36 @@
-﻿// PenController.cs
-// Key changes from v1:
-//   - UpdateOrientationServerRpc: live rotation preview during aim
-//   - SubmitFlickServerRpc: hAngle+vAngle+force (no raw direction — derived server-side)
-//   - AddForceAtPosition at pen tip → realistic spin/tumble on launch
-//   - Phase-based kinematic toggle: kinematic during aim, dynamic during simulate
-//   - PhysicsBody public accessor for CameraController auto-follow
+// PenController.cs — v3
+// Changes from v2:
+//   - SubmitFlickServerRpc: adds forceOffsetNorm (-0.5=tail, 0=center, 0.5=tip)
+//     AddForceAtPosition uses this offset → physics produces spin/arch naturally
+//   - SubmitRotateServerRpc: commits rotation as the turn move, no physics
+//   - SpinMoveServerRpc: torque around pen's long axis to dislodge stacked biros
+//   - PenLength public accessor for FlickInputHandler raycast offset calculation
 
 using Unity.Netcode;
 using UnityEngine;
 using Biros.Core;
 using Biros.Config;
-using log4net.Util;
-using System;
 
 namespace Biros.Gameplay
 {
     [RequireComponent(typeof(Rigidbody), typeof(Collider))]
     public class PenController : NetworkBehaviour
     {
-        private const float OOB_Y = -1.5f;
-        private const float BASE_STATIC_FRIC = 0.22f;
+        private const float OOB_Y             = -1.5f;
+        private const float BASE_STATIC_FRIC  = 0.22f;
         private const float BASE_DYNAMIC_FRIC = 0.12f;
-        private const float BASE_BOUNCINESS = 0.15f;
+        private const float BASE_BOUNCINESS   = 0.15f;
 
         [SerializeField] private PenConfigSO _config;
 
-        [Tooltip("World-space length tip-to-tip. Match your pen prefab scale.")]
+        [Tooltip("World-space length tip to tail. Match your pen prefab scale exactly.")]
         [SerializeField] private float _penLength = 0.35f;
 
         private Rigidbody _rb;
-        private Collider _col;
+        private Collider  _col;
 
-        /// <summary>Exposed so CameraController can read linearVelocity during auto-follow.</summary>
-        public Rigidbody PhysicsBody => _rb;
+        public Rigidbody  PhysicsBody => _rb;
+        public float      PenLength   => _penLength;
 
         // ── Network State ──────────────────────────────────────────────────
         private NetworkVariable<int> _ownerSlot = new(
@@ -50,22 +48,22 @@ namespace Biros.Gameplay
             NetworkVariableReadPermission.Everyone,
             NetworkVariableWritePermission.Server);
 
-        public int OwnerSlot => _ownerSlot.Value;
-        public ulong OwnerClientId => _ownerClientId.Value;
-        public bool IsOutOfBounds => _isOutOfBounds.Value;
-        public PenConfigSO Config => _config;
+        public int        OwnerSlot     => _ownerSlot.Value;
+        public ulong      OwnerClientId => _ownerClientId.Value;
+        public bool       IsOutOfBounds => _isOutOfBounds.Value;
+        public PenConfigSO Config       => _config;
 
         public bool IsSettled(float linearThreshold, float angularThreshold)
         {
             if (!IsServer || _isOutOfBounds.Value) return true;
-            return _rb.linearVelocity.magnitude < linearThreshold &&
+            return _rb.linearVelocity.magnitude  < linearThreshold &&
                    _rb.angularVelocity.magnitude < angularThreshold;
         }
 
         // ── Unity ──────────────────────────────────────────────────────────
         private void Awake()
         {
-            _rb = GetComponent<Rigidbody>();
+            _rb  = GetComponent<Rigidbody>();
             _col = GetComponent<Collider>();
         }
 
@@ -73,8 +71,6 @@ namespace Biros.Gameplay
         {
             base.OnNetworkSpawn();
             PenRegistry.Instance?.Register(this);
-
-            // Default: kinematic. Server enables physics when SimulatePhysics begins.
             _rb.isKinematic = true;
 
             if (IsServer)
@@ -89,7 +85,6 @@ namespace Biros.Gameplay
         {
             base.OnNetworkDespawn();
             PenRegistry.Instance?.Unregister(this);
-
             if (IsServer && MatchStateManager.Instance != null)
                 MatchStateManager.Instance.OnPhaseChanged -= HandlePhaseChanged;
         }
@@ -101,88 +96,92 @@ namespace Biros.Gameplay
         }
 
         // ── Server Init ────────────────────────────────────────────────────
-        /// <summary>
-        /// Call on server after spawning this pen. Binds it to a player slot.
-        /// </summary>
         public void ServerInitialize(int ownerSlot, ulong ownerClientId, PenConfigSO config)
         {
             if (!IsServer) return;
-            _ownerSlot.Value = ownerSlot;
+            _ownerSlot.Value     = ownerSlot;
             _ownerClientId.Value = ownerClientId;
-            _config = config;
+            _config              = config;
             ApplyConfig();
         }
 
-        // ── Phase Handling ─────────────────────────────────────────────────
+        // ── Phase: kinematic toggle ────────────────────────────────────────
         private void HandlePhaseChanged(MatchPhase prev, MatchPhase next)
         {
             if (!IsServer || _isOutOfBounds.Value) return;
-
-            // Dynamic only while physics is actively running
             bool simulate = next == MatchPhase.SimulatePhysics ||
                             next == MatchPhase.ResolveRound;
             _rb.isKinematic = !simulate;
         }
 
-        // ── Orientation RPC (live preview while player aims) ───────────────
+        // ── RPC: Live orientation preview ──────────────────────────────────
         /// <summary>
-        /// Rate-limited from FlickInputHandler (~20 Hz).
-        /// Server sets transform.rotation so NetworkTransform broadcasts to all clients,
-        /// giving everyone a live visual of the pen being aimed.
+        /// Sent at ~20 Hz while the player rotates the pen during their turn.
+        /// Server sets transform.rotation; NetworkTransform broadcasts it to all clients.
         /// </summary>
         [ServerRpc(RequireOwnership = false)]
         public void UpdateOrientationServerRpc(float hAngle, float vAngle,
                                                ServerRpcParams rpcParams = default)
         {
-            ulong sender = rpcParams.Receive.SenderClientId;
+            if (!ValidateActiveOwner(rpcParams.Receive.SenderClientId)) return;
             if (MatchStateManager.Instance?.CurrentPhase != MatchPhase.ActiveTurnInput) return;
-            if (_ownerClientId.Value != sender) return;
-            if (MatchStateManager.Instance.ActivePlayerClientId != sender) return;
 
             vAngle = Mathf.Clamp(vAngle, 0f, 85f);
-            // Euler(-vAngle, hAngle, 0):
-            //   hAngle rotates pen on desk (Y axis)
-            //   -vAngle tilts nose upward (negative X = nose rises in Unity's left-hand coords)
             transform.rotation = Quaternion.Euler(-vAngle, hAngle, 0f);
         }
 
-        // ── Flick RPC ──────────────────────────────────────────────────────
+        // ── RPC: Commit rotation as turn move ──────────────────────────────
         /// <summary>
-        /// Sent once by FlickInputHandler on release.
-        /// Applies the final orientation, switches to dynamic physics, then applies
-        /// force at the pen's tip — creating linear velocity AND angular spin,
-        /// exactly like a real flick where you hit the end of the pen.
+        /// Player chose to use their turn purely for alignment.
+        /// Locks in orientation, advances to SwitchPlayer with no physics.
         /// </summary>
         [ServerRpc(RequireOwnership = false)]
-        public void SubmitFlickServerRpc(float hAngle, float vAngle, float force,
-                                         ServerRpcParams rpcParams = default)
+        public void SubmitRotateServerRpc(float hAngle, float vAngle,
+                                          ServerRpcParams rpcParams = default)
         {
-            ulong sender = rpcParams.Receive.SenderClientId;
+            if (!ValidateActiveOwner(rpcParams.Receive.SenderClientId)) return;
             if (MatchStateManager.Instance?.CurrentPhase != MatchPhase.ActiveTurnInput) return;
-            if (_ownerClientId.Value != sender) return;
-            if (MatchStateManager.Instance.ActivePlayerClientId != sender) return;
 
-            // Apply final validated orientation
             vAngle = Mathf.Clamp(vAngle, 0f, 85f);
             transform.rotation = Quaternion.Euler(-vAngle, hAngle, 0f);
 
-            // Enable physics before applying force
+            MatchStateManager.Instance.ServerNotifyRotateSubmitted();
+        }
+
+        // ── RPC: Flick ─────────────────────────────────────────────────────
+        /// <summary>
+        /// forceOffsetNorm: -0.5 = tail, 0 = center, 0.5 = tip.
+        /// AddForceAtPosition at that point creates the correct torque automatically:
+        ///   center tap  → mostly linear, low spin → flat straight shot
+        ///   tip tap     → high torque, lots of spin → pen arches and tumbles
+        /// No artificial arching code — pure Unity physics.
+        /// </summary>
+        [ServerRpc(RequireOwnership = false)]
+        public void SubmitFlickServerRpc(float hAngle, float vAngle,
+                                         float force, float forceOffsetNorm,
+                                         ServerRpcParams rpcParams = default)
+        {
+            if (!ValidateActiveOwner(rpcParams.Receive.SenderClientId)) return;
+            if (MatchStateManager.Instance?.CurrentPhase != MatchPhase.ActiveTurnInput) return;
+
+            vAngle = Mathf.Clamp(vAngle, 0f, 85f);
+            transform.rotation = Quaternion.Euler(-vAngle, hAngle, 0f);
+
             _rb.isKinematic = false;
 
             Vector3 launchDir = transform.forward;
 
-            // Force clamped to config cap — prevents exploit inputs
             float clampedForce = Mathf.Clamp(force, 0.05f, _config.maxFlickForce)
                                  * _config.flickForceMultiplier;
 
-            // AddForceAtPosition at the pen tip:
-            // Linear impulse  → pen moves in launch direction
-            // Angular impulse → pen spins/tumbles realistically
-            // 0.42 places the force point slightly behind the very tip (more natural arc)
-            Vector3 flickPoint = transform.position + launchDir * (_penLength * 0.42f);
-            _rb.AddForceAtPosition(launchDir * clampedForce, flickPoint, ForceMode.Impulse);
+            // Clamp offset to valid range and compute world-space force point
+            forceOffsetNorm = Mathf.Clamp(forceOffsetNorm, -0.5f, 0.5f);
+            Vector3 forcePoint = transform.position + transform.forward
+                                 * (_penLength * forceOffsetNorm);
 
-            // BittenChewed cap: extra random erratic torque
+            _rb.AddForceAtPosition(launchDir * clampedForce, forcePoint, ForceMode.Impulse);
+
+            // BittenChewed cap: additional random torque on top of natural spin
             if (_config.ErraticSpinMultiplier > 1f)
             {
                 Vector3 chaos = UnityEngine.Random.insideUnitSphere
@@ -194,24 +193,58 @@ namespace Biros.Gameplay
             MatchStateManager.Instance.ServerNotifyFlickSubmitted();
         }
 
+        // ── RPC: Spin move ─────────────────────────────────────────────────
+        /// <summary>
+        /// Applies torque around the pen's own long axis — spins it like a drill bit
+        /// on the desk surface. When biros are stacked or touching, the contact friction
+        /// during the spin pushes the other pen away. Counts as the player's turn.
+        /// clockwise is relative to transform.forward pointing away from you.
+        /// </summary>
+        [ServerRpc(RequireOwnership = false)]
+        public void SpinMoveServerRpc(float torqueForce, bool clockwise,
+                                      ServerRpcParams rpcParams = default)
+        {
+            if (!ValidateActiveOwner(rpcParams.Receive.SenderClientId)) return;
+            if (MatchStateManager.Instance?.CurrentPhase != MatchPhase.ActiveTurnInput) return;
+
+            _rb.isKinematic = false;
+
+            float direction = clockwise ? 1f : -1f;
+
+            // Primary: spin around long axis
+            _rb.AddTorque(transform.forward * torqueForce * direction, ForceMode.Impulse);
+
+            // Tiny upward nudge reduces normal force briefly, lowering desk friction
+            // so the spin can actually develop before being damped — feels snappier
+            _rb.AddForce(transform.up * (torqueForce * 0.08f), ForceMode.Impulse);
+
+            MatchStateManager.Instance.ServerNotifyFlickSubmitted();
+        }
+
         // ── Private ─────────────────────────────────────────────────────────
+        private bool ValidateActiveOwner(ulong senderId)
+        {
+            if (MatchStateManager.Instance == null) return false;
+            return _ownerClientId.Value == senderId &&
+                   MatchStateManager.Instance.ActivePlayerClientId == senderId;
+        }
+
         private void ApplyConfig()
         {
             if (_config == null) return;
 
-            _rb.mass = _config.ComputedMass;
-            _rb.linearDamping = _config.drag;
+            _rb.mass           = _config.ComputedMass;
+            _rb.linearDamping  = _config.drag;
             _rb.angularDamping = _config.angularDrag;
-            _rb.centerOfMass = new Vector3(0f, 0f, _config.CenterOfMassShiftZ);
+            _rb.centerOfMass   = new Vector3(0f, 0f, _config.CenterOfMassShiftZ);
 
-            // Unique material per pen instance — never mutate shared SO assets
             var mat = new PhysicsMaterial($"PenMat_{_config.configId}")
             {
-                staticFriction = BASE_STATIC_FRIC * _config.ComputedFrictionScalar,
+                staticFriction  = BASE_STATIC_FRIC  * _config.ComputedFrictionScalar,
                 dynamicFriction = BASE_DYNAMIC_FRIC * _config.ComputedFrictionScalar,
-                bounciness = BASE_BOUNCINESS * _config.ComputedImpactDampening,
+                bounciness      = BASE_BOUNCINESS   * _config.ComputedImpactDampening,
                 frictionCombine = PhysicsMaterialCombine.Multiply,
-                bounceCombine = PhysicsMaterialCombine.Average,
+                bounceCombine   = PhysicsMaterialCombine.Average,
             };
             _col.material = mat;
         }
@@ -219,9 +252,9 @@ namespace Biros.Gameplay
         private void ServerHandleOutOfBounds()
         {
             _isOutOfBounds.Value = true;
-            _rb.isKinematic = true;
-            _rb.linearVelocity = Vector3.zero;
-            _rb.angularVelocity = Vector3.zero;
+            _rb.isKinematic      = true;
+            _rb.linearVelocity   = Vector3.zero;
+            _rb.angularVelocity  = Vector3.zero;
             MatchStateManager.Instance?.ServerOnPenExitedBounds(_ownerClientId.Value);
         }
     }
