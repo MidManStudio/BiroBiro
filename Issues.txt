@@ -1,0 +1,20 @@
+Assets/AA_Scripts/Biros/CameraSystem/CameraController.cs(7,13): error CS0234: The type or namespace name 'Cinemachine' does not exist in the namespace 'Unity' (are you missing an assembly reference?)
+
+Assets/AA_Scripts/Biros/Core/MatchStateManager.cs(6,25): error CS0234: The type or namespace name 'Netcode' does not exist in the namespace 'MidManStudio.Core' (are you missing an assembly reference?)
+
+Assets/AA_Scripts/Biros/Gameplay/PenController.cs(12,13): error CS0234: The type or namespace name 'Config' does not exist in the namespace 'Biros' (are you missing an assembly reference?)
+
+Assets/AA_Scripts/Biros/CameraSystem/CameraController.cs(18,34): error CS0246: The type or namespace name 'CinemachineCamera' could not be found (are you missing a using directive or an assembly reference?)
+
+Assets/AA_Scripts/Biros/CameraSystem/CameraController.cs(47,17): error CS0246: The type or namespace name 'CinemachineOrbitalFollow' could not be found (are you missing a using directive or an assembly reference?)
+
+Assets/AA_Scripts/Biros/Core/MatchStateManager.cs(12,38): error CS0246: The type or namespace name 'NetworkSingleton<>' could not be found (are you missing a using directive or an assembly reference?)
+
+Assets/AA_Scripts/Biros/Core/MatchStateManager.cs(13,38): error CS0246: The type or namespace name 'INetworkSingletonLifecycle' could not be found (are you missing a using directive or an assembly reference?)
+
+Assets/AA_Scripts/Biros/Gameplay/PenController.cs(54,16): error CS0246: The type or namespace name 'PenConfigSO' could not be found (are you missing a using directive or an assembly reference?)
+
+Assets/AA_Scripts/Biros/Gameplay/PenController.cs(99,74): error CS0246: The type or namespace name 'PenConfigSO' could not be found (are you missing a using directive or an assembly reference?)
+
+Assets/AA_Scripts/Biros/Gameplay/PenController.cs(24,34): error CS0246: The type or namespace name 'PenConfigSO' could not be found (are you missing a using directive or an assembly reference?)
+
