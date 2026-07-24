@@ -3,7 +3,8 @@ using System.Collections;
 using System.Collections.Generic;
 using Unity.Netcode;
 using UnityEngine;
-using MidManStudio.Core.Netcode;
+using MidManStudio.Netcode;
+using MidManStudio.Netcode.Singleton;
 using MidManStudio.Core.Timers;
 using System.Diagnostics;
 
