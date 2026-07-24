@@ -4,12 +4,19 @@ using Unity.Netcode;
 using UnityEngine;
 using Biros.Core;
 using Biros.Gameplay;
+using Biros.Config;
 
 public class TestMatchBootstrap : MonoBehaviour
 {
     [SerializeField] private GameObject _penPrefab;
     [SerializeField] private Transform _spawnA;
     [SerializeField] private Transform _spawnB;
+
+    [Header("Test Configs")]
+    [Tooltip("Assigned to pen A. If left empty, pen A keeps whatever _config is already serialized on the prefab.")]
+    [SerializeField] private PenConfigSO _configA;
+    [Tooltip("Assigned to pen B. If left empty, pen B keeps whatever _config is already serialized on the prefab.")]
+    [SerializeField] private PenConfigSO _configB;
 
     private void Start()
     {
@@ -28,14 +35,14 @@ public class TestMatchBootstrap : MonoBehaviour
         var penA = Instantiate(_penPrefab, _spawnA.position, _spawnA.rotation);
         penA.GetComponent<NetworkObject>().Spawn();
         penA.GetComponent<PenController>().ServerInitialize(
-            0, NetworkManager.Singleton.LocalClientId, null);
+            0, NetworkManager.Singleton.LocalClientId, _configA);
 
         // In a real match a second client would connect; for solo testing
         // register the host as both slots so the state machine can loop.
         var penB = Instantiate(_penPrefab, _spawnB.position, _spawnB.rotation);
         penB.GetComponent<NetworkObject>().Spawn();
         penB.GetComponent<PenController>().ServerInitialize(
-            1, NetworkManager.Singleton.LocalClientId, null);
+            1, NetworkManager.Singleton.LocalClientId, _configB);
 
         var players = new List<ulong> { NetworkManager.Singleton.LocalClientId,
                                          NetworkManager.Singleton.LocalClientId };
