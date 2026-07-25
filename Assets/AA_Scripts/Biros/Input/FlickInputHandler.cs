@@ -149,8 +149,8 @@ namespace Biros.Input
             switch (_phase)
             {
                 case Phase.RotatingPen:      TickRotate(); break;
-                case Phase.ChargingFlick:    TickCharge(); break;
-                case Phase.ChargingSpinMove: TickCharge(); break;
+              //  case Phase.ChargingFlick:    TickCharge(); break;
+              //  case Phase.ChargingSpinMove: TickCharge(); break;
             }
         }
 

@@ -56,7 +56,7 @@ namespace Biros.Gameplay
         public bool IsSettled(float linearThreshold, float angularThreshold)
         {
             if (!IsServer || _isOutOfBounds.Value) return true;
-            return _rb.linearVelocity.magnitude  < linearThreshold &&
+            return _rb.velocity.magnitude  < linearThreshold &&
                    _rb.angularVelocity.magnitude < angularThreshold;
         }
 
@@ -234,17 +234,17 @@ namespace Biros.Gameplay
             if (_config == null) return;
 
             _rb.mass           = _config.ComputedMass;
-            _rb.linearDamping  = _config.drag;
-            _rb.angularDamping = _config.angularDrag;
+            _rb.drag  = _config.drag;
+            _rb.angularDrag = _config.angularDrag;
             _rb.centerOfMass   = new Vector3(0f, 0f, _config.CenterOfMassShiftZ);
-
-            var mat = new PhysicsMaterial($"PenMat_{_config.configId}")
+            
+            var mat = new PhysicMaterial($"PenMat_{_config.configId}")
             {
                 staticFriction  = BASE_STATIC_FRIC  * _config.ComputedFrictionScalar,
                 dynamicFriction = BASE_DYNAMIC_FRIC * _config.ComputedFrictionScalar,
                 bounciness      = BASE_BOUNCINESS   * _config.ComputedImpactDampening,
-                frictionCombine = PhysicsMaterialCombine.Multiply,
-                bounceCombine   = PhysicsMaterialCombine.Average,
+                frictionCombine = PhysicMaterialCombine.Multiply,
+                bounceCombine   = PhysicMaterialCombine.Average,
             };
             _col.material = mat;
         }
@@ -253,7 +253,7 @@ namespace Biros.Gameplay
         {
             _isOutOfBounds.Value = true;
             _rb.isKinematic      = true;
-            _rb.linearVelocity   = Vector3.zero;
+            _rb.velocity   = Vector3.zero;
             _rb.angularVelocity  = Vector3.zero;
             MatchStateManager.Instance?.ServerOnPenExitedBounds(_ownerClientId.Value);
         }

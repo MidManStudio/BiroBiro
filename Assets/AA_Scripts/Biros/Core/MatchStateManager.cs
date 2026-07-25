@@ -6,8 +6,7 @@ using UnityEngine;
 using MidManStudio.Netcode;
 using MidManStudio.Netcode.Singleton;
 using MidManStudio.Core.Timers;
-using System.Diagnostics;
-
+using NetworkTimer = MidManStudio.Netcode.NetworkTimer;
 namespace Biros.Core
 {
     public class MatchStateManager : NetworkSingleton<MatchStateManager>,
@@ -68,7 +67,7 @@ namespace Biros.Core
 
         public float TurnTimerNormalized =>
             (_turnTimer != null && _turnDurationSeconds > 0f)
-                ? Mathf.Clamp01(_turnTimer.TimeRemaining / _turnDurationSeconds)
+                ? Mathf.Clamp01(_turnTimer.Progress / _turnDurationSeconds)
                 : 0f;
 
         // ── INetworkSingletonLifecycle ─────────────────────────────────────

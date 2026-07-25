@@ -4,18 +4,17 @@
 // Assign CinemachineCamera reference and InputActionReferences in inspector.
 
 using System.Collections;
-using Unity.Cinemachine;
 using UnityEngine;
 using UnityEngine.InputSystem;
 using Biros.Core;
 using Biros.Gameplay;
-
+using Cinemachine;
 namespace Biros.CameraSystem
 {
     public class CameraController : MonoBehaviour
     {
         [Header("Cinemachine")]
-        [SerializeField] private CinemachineCamera _vcam;
+        [SerializeField] private CinemachineVirtualCamera _vcam;
 
         [Header("Input — Camera")]
         [Tooltip("Middle Mouse Button held = orbit modifier")]
@@ -44,7 +43,7 @@ namespace Biros.CameraSystem
         [SerializeField] private float _overheadRadial = 5.5f;
 
         // ── Runtime ────────────────────────────────────────────────────────
-        private CinemachineOrbitalFollow _orbital;
+        private CinemachineOrbitalTransposer _orbital;
         private PenController _trackedPen;
         private bool _autoFollowing;
         private Coroutine _resetRoutine;
@@ -52,7 +51,7 @@ namespace Biros.CameraSystem
         // ── Unity ──────────────────────────────────────────────────────────
         private void Awake()
         {
-            _orbital = _vcam != null ? _vcam.GetComponent<CinemachineOrbitalFollow>() : null;
+            _orbital = _vcam != null ? _vcam.GetComponent<CinemachineOrbitalTransposer>() : null;
             if (_orbital == null)
                 Debug.LogError("[CameraController] CinemachineOrbitalFollow not found on _vcam.");
         }
@@ -110,9 +109,9 @@ namespace Biros.CameraSystem
             Vector2 delta = _orbitDelta.action.ReadValue<Vector2>();
             if (delta.sqrMagnitude < 0.01f) return;
 
-            _orbital.HorizontalAxis.Value += delta.x * _orbitSensH;
-            _orbital.VerticalAxis.Value -= delta.y * _orbitSensV;
-            _orbital.VerticalAxis.Value = Mathf.Clamp(_orbital.VerticalAxis.Value, 10f, 85f);
+            _orbital.m_XAxis.Value += delta.x * _orbitSensH;
+            _orbital.m_XAxis.Value -= delta.y * _orbitSensV;
+            _orbital.m_XAxis.Value = Mathf.Clamp(_orbital.m_XAxis.Value, 10f, 85f);
         }
 
         // ── Auto-Follow during physics simulation ──────────────────────────
@@ -122,13 +121,13 @@ namespace Biros.CameraSystem
         {
             if (_trackedPen?.PhysicsBody == null) return;
 
-            Vector3 vel = _trackedPen.PhysicsBody.linearVelocity;
+            Vector3 vel = _trackedPen.PhysicsBody.velocity;
             if (vel.sqrMagnitude < 0.1f) return;
 
             // Camera goes behind pen: angle = direction of travel + 180°
             float targetAngle = Mathf.Atan2(vel.x, vel.z) * Mathf.Rad2Deg + 180f;
-            _orbital.HorizontalAxis.Value = Mathf.LerpAngle(
-                _orbital.HorizontalAxis.Value, targetAngle,
+            _orbital.m_XAxis.Value = Mathf.LerpAngle(
+                _orbital.m_XAxis.Value, targetAngle,
                 Time.deltaTime * _autoFollowSpeed);
         }
 
@@ -139,8 +138,8 @@ namespace Biros.CameraSystem
             float scroll = _zoomAction.action.ReadValue<float>();
             if (Mathf.Abs(scroll) < 0.001f) return;
 
-            _orbital.RadialAxis.Value -= scroll * _zoomSens;
-            _orbital.RadialAxis.Value = Mathf.Clamp(_orbital.RadialAxis.Value, _zoomMin, _zoomMax);
+            _orbital.m_XAxis.Value -= scroll * _zoomSens;
+            _orbital.m_XAxis.Value = Mathf.Clamp(_orbital.m_XAxis.Value, _zoomMin, _zoomMax);
         }
 
         // ── Overhead Reset ─────────────────────────────────────────────────
@@ -155,17 +154,17 @@ namespace Biros.CameraSystem
             while (true)
             {
                 float t = Time.deltaTime * _resetSpeed;
-                _orbital.HorizontalAxis.Value = Mathf.LerpAngle(
-                    _orbital.HorizontalAxis.Value, _overheadH, t);
-                _orbital.VerticalAxis.Value = Mathf.Lerp(
-                    _orbital.VerticalAxis.Value, _overheadV, t);
-                _orbital.RadialAxis.Value = Mathf.Lerp(
-                    _orbital.RadialAxis.Value, _overheadRadial, t);
+                _orbital.m_XAxis.Value = Mathf.LerpAngle(
+                    _orbital.m_XAxis.Value, _overheadH, t);
+                _orbital.m_XAxis.Value = Mathf.Lerp(
+                    _orbital.m_XAxis.Value, _overheadV, t);
+                _orbital.m_XAxis.Value = Mathf.Lerp(
+                    _orbital.m_XAxis.Value, _overheadRadial, t);
 
                 bool done =
-                    Mathf.Abs(Mathf.DeltaAngle(_orbital.HorizontalAxis.Value, _overheadH)) < 1f &&
-                    Mathf.Abs(_orbital.VerticalAxis.Value - _overheadV) < 0.5f &&
-                    Mathf.Abs(_orbital.RadialAxis.Value - _overheadRadial) < 0.05f;
+                    Mathf.Abs(Mathf.DeltaAngle(_orbital.m_XAxis.Value, _overheadH)) < 1f &&
+                    Mathf.Abs(_orbital.m_XAxis.Value - _overheadV) < 0.5f &&
+                    Mathf.Abs(_orbital.m_XAxis.Value - _overheadRadial) < 0.05f;
 
                 if (done) yield break;
                 yield return null;

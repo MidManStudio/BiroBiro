@@ -6,7 +6,7 @@
         "MidManStudio.Netcode",
         "Unity.Netcode.Runtime",
         "Unity.InputSystem",
-        "Unity.Cinemachine"
+        "Cinemachine"
     ],
     "includePlatforms": [],
     "excludePlatforms": [],
