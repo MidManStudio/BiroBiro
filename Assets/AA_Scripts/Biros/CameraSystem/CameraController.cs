@@ -1,20 +1,40 @@
 ﻿// CameraController.cs
-// Requires: com.unity.cinemachine 3.x, com.unity.inputsystem
+// Requires: com.unity.cinemachine 2.9.7 (your pinned version — this does NOT need
+// an upgrade), com.unity.inputsystem.
 // Attach to any persistent client-side GameObject.
-// Assign CinemachineCamera reference and InputActionReferences in inspector.
+// Assign a CinemachineFreeLook reference and the InputActionReferences in inspector.
+//
+// WHY CinemachineFreeLook AND NOT CinemachineVirtualCamera + CinemachineOrbitalTransposer:
+// OrbitalTransposer only exposes m_XAxis (heading, AxisState, -180..180, wraps).
+// It has no separate continuously-adjustable vertical-tilt or radius axis — on a
+// plain Transposer, vertical offset and distance come from a single fixed
+// m_FollowOffset Vector3, not something meant to be driven live from drag/scroll
+// input. Driving m_XAxis for orbit AND vertical AND zoom all at once (which is
+// what trying to force this onto OrbitalTransposer leads to) means all three
+// controls fight over the same field.
+// FreeLook is the idiomatic 2.x tool for "360 heading + vertical tilt + zoom":
+// it blends 3 rigs (Top/Middle/Bottom) via m_YAxis (0..1), independent heading
+// via m_XAxis (-180..180, wraps), and each rig has its own Height/Radius
+// (CinemachineFreeLook.Orbit.m_Height / m_Radius).
+//
+// NOTE ON NUMBERS: _orbitSensV and the Y-axis clamp/overhead values below are
+// starting points, not tested/tuned values — FreeLook's Y axis is a 0..1 rig
+// blend, not degrees, so the old "10f, 85f" degree clamp doesn't carry over
+// directly. Adjust by feel once you can actually drag the camera in Play mode.
 
 using System.Collections;
 using UnityEngine;
 using UnityEngine.InputSystem;
+using Cinemachine;
 using Biros.Core;
 using Biros.Gameplay;
-using Cinemachine;
+
 namespace Biros.CameraSystem
 {
     public class CameraController : MonoBehaviour
     {
         [Header("Cinemachine")]
-        [SerializeField] private CinemachineVirtualCamera _vcam;
+        [SerializeField] private CinemachineFreeLook _freeLook;
 
         [Header("Input — Camera")]
         [Tooltip("Middle Mouse Button held = orbit modifier")]
@@ -25,10 +45,15 @@ namespace Biros.CameraSystem
         [SerializeField] private InputActionReference _resetAction;   // F key
 
         [Header("Orbit Sensitivity")]
-        [SerializeField] private float _orbitSensH = 0.30f;
-        [SerializeField] private float _orbitSensV = 0.20f;
+        [SerializeField] private float _orbitSensH = 0.30f;   // degrees per pixel of delta.x on m_XAxis
+        [Tooltip("m_YAxis is 0..1, not degrees. Placeholder — tune by feel.")]
+        [SerializeField] private float _orbitSensV = 0.004f;
 
-        [Header("Zoom")]
+        [Header("Vertical Range — m_YAxis (0 = Bottom rig, 1 = Top rig)")]
+        [SerializeField] private float _yAxisMin = 0.10f;
+        [SerializeField] private float _yAxisMax = 0.95f;
+
+        [Header("Zoom (applied uniformly to all 3 rig radii)")]
         [SerializeField] private float _zoomMin = 1.5f;
         [SerializeField] private float _zoomMax = 8.0f;
         [SerializeField] private float _zoomSens = 0.35f;
@@ -39,21 +64,26 @@ namespace Biros.CameraSystem
         [Header("Overhead Reset")]
         [SerializeField] private float _resetSpeed = 2.5f;
         [SerializeField] private float _overheadH = 0f;
-        [SerializeField] private float _overheadV = 65f;   // degrees elevation from horizon
+        [Tooltip("0..1 target for m_YAxis on reset. Near 1 = mostly Top rig (looking down).")]
+        [SerializeField] private float _overheadYAxis = 0.85f;
         [SerializeField] private float _overheadRadial = 5.5f;
 
         // ── Runtime ────────────────────────────────────────────────────────
-        private CinemachineOrbitalTransposer _orbital;
         private PenController _trackedPen;
         private bool _autoFollowing;
         private Coroutine _resetRoutine;
+        private float _currentRadius;
 
         // ── Unity ──────────────────────────────────────────────────────────
         private void Awake()
         {
-            _orbital = _vcam != null ? _vcam.GetComponent<CinemachineOrbitalTransposer>() : null;
-            if (_orbital == null)
-                Debug.LogError("[CameraController] CinemachineOrbitalFollow not found on _vcam.");
+            if (_freeLook == null)
+            {
+                Debug.LogError("[CameraController] _freeLook not assigned.");
+                return;
+            }
+            // Seed the shared zoom radius from whatever the Middle rig (index 1) is set to.
+            _currentRadius = Mathf.Clamp(_freeLook.m_Orbits[1].m_Radius, _zoomMin, _zoomMax);
         }
 
         private void OnEnable()
@@ -61,8 +91,11 @@ namespace Biros.CameraSystem
             Enable(_orbitModifier); Enable(_orbitDelta);
             Enable(_zoomAction); Enable(_resetAction);
 
+            // Named method, not a lambda — a lambda here would create a new delegate
+            // instance each time, so the OnDisable "-=" below would silently fail to
+            // unsubscribe it (this was a real bug in the previous version).
             if (_resetAction?.action != null)
-                _resetAction.action.performed += _ => BeginOverheadReset();
+                _resetAction.action.performed += OnResetPerformed;
         }
 
         private void OnDisable()
@@ -71,8 +104,10 @@ namespace Biros.CameraSystem
             Disable(_zoomAction); Disable(_resetAction);
 
             if (_resetAction?.action != null)
-                _resetAction.action.performed -= _ => BeginOverheadReset();
+                _resetAction.action.performed -= OnResetPerformed;
         }
+
+        private void OnResetPerformed(InputAction.CallbackContext _) => BeginOverheadReset();
 
         private void Start()
         {
@@ -90,7 +125,7 @@ namespace Biros.CameraSystem
 
         private void LateUpdate()
         {
-            if (_orbital == null) return;
+            if (_freeLook == null) return;
 
             if (_autoFollowing)
                 TickAutoFollow();
@@ -98,6 +133,7 @@ namespace Biros.CameraSystem
                 TickManualOrbit();
 
             TickZoom();
+            ApplyRadiusToOrbits();
         }
 
         // ── Orbit ─────────────────────────────────────────────────────────
@@ -109,9 +145,9 @@ namespace Biros.CameraSystem
             Vector2 delta = _orbitDelta.action.ReadValue<Vector2>();
             if (delta.sqrMagnitude < 0.01f) return;
 
-            _orbital.m_XAxis.Value += delta.x * _orbitSensH;
-            _orbital.m_XAxis.Value -= delta.y * _orbitSensV;
-            _orbital.m_XAxis.Value = Mathf.Clamp(_orbital.m_XAxis.Value, 10f, 85f);
+            _freeLook.m_XAxis.Value += delta.x * _orbitSensH;
+            _freeLook.m_YAxis.Value += delta.y * _orbitSensV;
+            _freeLook.m_YAxis.Value = Mathf.Clamp(_freeLook.m_YAxis.Value, _yAxisMin, _yAxisMax);
         }
 
         // ── Auto-Follow during physics simulation ──────────────────────────
@@ -126,20 +162,30 @@ namespace Biros.CameraSystem
 
             // Camera goes behind pen: angle = direction of travel + 180°
             float targetAngle = Mathf.Atan2(vel.x, vel.z) * Mathf.Rad2Deg + 180f;
-            _orbital.m_XAxis.Value = Mathf.LerpAngle(
-                _orbital.m_XAxis.Value, targetAngle,
+            _freeLook.m_XAxis.Value = Mathf.LerpAngle(
+                _freeLook.m_XAxis.Value, targetAngle,
                 Time.deltaTime * _autoFollowSpeed);
         }
 
         // ── Zoom ───────────────────────────────────────────────────────────
+        // FreeLook has no single "radius" axis — each rig has its own m_Radius.
+        // Simplest correct approach: track one shared radius value and apply it
+        // to all 3 rigs identically each frame. Heights stay whatever's set per
+        // rig in the Inspector, which is what actually creates the vertical spread.
         private void TickZoom()
         {
             if (_zoomAction?.action == null) return;
             float scroll = _zoomAction.action.ReadValue<float>();
             if (Mathf.Abs(scroll) < 0.001f) return;
 
-            _orbital.m_XAxis.Value -= scroll * _zoomSens;
-            _orbital.m_XAxis.Value = Mathf.Clamp(_orbital.m_XAxis.Value, _zoomMin, _zoomMax);
+            _currentRadius -= scroll * _zoomSens;
+            _currentRadius = Mathf.Clamp(_currentRadius, _zoomMin, _zoomMax);
+        }
+
+        private void ApplyRadiusToOrbits()
+        {
+            for (int i = 0; i < _freeLook.m_Orbits.Length; i++)
+                _freeLook.m_Orbits[i].m_Radius = _currentRadius;
         }
 
         // ── Overhead Reset ─────────────────────────────────────────────────
@@ -154,17 +200,14 @@ namespace Biros.CameraSystem
             while (true)
             {
                 float t = Time.deltaTime * _resetSpeed;
-                _orbital.m_XAxis.Value = Mathf.LerpAngle(
-                    _orbital.m_XAxis.Value, _overheadH, t);
-                _orbital.m_XAxis.Value = Mathf.Lerp(
-                    _orbital.m_XAxis.Value, _overheadV, t);
-                _orbital.m_XAxis.Value = Mathf.Lerp(
-                    _orbital.m_XAxis.Value, _overheadRadial, t);
+                _freeLook.m_XAxis.Value = Mathf.LerpAngle(_freeLook.m_XAxis.Value, _overheadH, t);
+                _freeLook.m_YAxis.Value = Mathf.Lerp(_freeLook.m_YAxis.Value, _overheadYAxis, t);
+                _currentRadius          = Mathf.Lerp(_currentRadius, _overheadRadial, t);
 
                 bool done =
-                    Mathf.Abs(Mathf.DeltaAngle(_orbital.m_XAxis.Value, _overheadH)) < 1f &&
-                    Mathf.Abs(_orbital.m_XAxis.Value - _overheadV) < 0.5f &&
-                    Mathf.Abs(_orbital.m_XAxis.Value - _overheadRadial) < 0.05f;
+                    Mathf.Abs(Mathf.DeltaAngle(_freeLook.m_XAxis.Value, _overheadH)) < 1f &&
+                    Mathf.Abs(_freeLook.m_YAxis.Value - _overheadYAxis) < 0.01f &&
+                    Mathf.Abs(_currentRadius - _overheadRadial) < 0.05f;
 
                 if (done) yield break;
                 yield return null;
@@ -185,9 +228,9 @@ namespace Biros.CameraSystem
             if (PenRegistry.Instance == null) return;
             _trackedPen = PenRegistry.Instance.GetPenForSlot(newSlot);
 
-            if (_trackedPen == null || _vcam == null) return;
-            _vcam.Follow = _trackedPen.transform;
-            _vcam.LookAt = _trackedPen.transform;
+            if (_trackedPen == null || _freeLook == null) return;
+            _freeLook.Follow = _trackedPen.transform;
+            _freeLook.LookAt = _trackedPen.transform;
         }
 
         // ── Helpers ────────────────────────────────────────────────────────
