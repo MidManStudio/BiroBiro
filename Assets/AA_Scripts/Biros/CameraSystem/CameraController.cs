@@ -54,9 +54,10 @@ namespace Biros.CameraSystem
         [SerializeField] private float _yAxisMax = 0.95f;
 
         [Header("Zoom (applied uniformly to all 3 rig radii)")]
-        [SerializeField] private float _zoomMin = 1.5f;
-        [SerializeField] private float _zoomMax = 8.0f;
-        [SerializeField] private float _zoomSens = 0.35f;
+        [Tooltip("Previous defaults (1.5–8.0) were too tight to see most of a 2.4x1.6 desk. Widened — tune further by feel.")]
+        [SerializeField] private float _zoomMin = 2.5f;
+        [SerializeField] private float _zoomMax = 14.0f;
+        [SerializeField] private float _zoomSens = 0.5f;
 
         [Header("Auto-Follow (SimulatePhysics)")]
         [SerializeField] private float _autoFollowSpeed = 2.5f;
@@ -66,7 +67,7 @@ namespace Biros.CameraSystem
         [SerializeField] private float _overheadH = 0f;
         [Tooltip("0..1 target for m_YAxis on reset. Near 1 = mostly Top rig (looking down).")]
         [SerializeField] private float _overheadYAxis = 0.85f;
-        [SerializeField] private float _overheadRadial = 5.5f;
+        [SerializeField] private float _overheadRadial = 9.0f;
 
         // ── Runtime ────────────────────────────────────────────────────────
         private PenController _trackedPen;

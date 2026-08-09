@@ -12,6 +12,7 @@
 // LMB release just cancels back to Idle with no turn cost.
 
 using System;
+using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.InputSystem;
 using Biros.Core;
@@ -21,6 +22,14 @@ namespace Biros.Input
 {
     public class FlickInputHandler : MonoBehaviour
     {
+        [Header("Trajectory Preview")]
+        [Tooltip("LineRenderer that draws the predicted flight path while charging a flick. Needs a material assigned (e.g. Sprites-Default) or it renders invisible/pink.")]
+        [SerializeField] private LineRenderer _trajectoryLine;
+        [SerializeField] private int _trajectorySamples = 30;
+        [SerializeField] private float _trajectoryTimeStep = 0.04f;
+        [Tooltip("Y position the desk surface sits at — the preview stops once it would hit this.")]
+        [SerializeField] private float _deskSurfaceY = 0.05f;
+
         [Header("Input Actions")]
         [SerializeField] private InputActionReference _selectAction;       // LMB — rotate move
         [SerializeField] private InputActionReference _mouseDelta;         // Mouse Delta
@@ -149,9 +158,20 @@ namespace Biros.Input
             switch (_phase)
             {
                 case Phase.RotatingPen:      TickRotate(); break;
-              //  case Phase.ChargingFlick:    TickCharge(); break;
-              //  case Phase.ChargingSpinMove: TickCharge(); break;
+                case Phase.ChargingFlick:    TickCharge(); UpdateTrajectoryPreview(); break;
+                case Phase.ChargingSpinMove: TickCharge(); break;
             }
+        }
+
+        // This didn't exist before — the switch cases above called it but the method
+        // itself was never written, which is presumably why the cases got commented out
+        // rather than left as a compile error. _charge was permanently stuck at 0, so
+        // every flick/spin fired at exactly _minForceFrac of max force regardless of
+        // how long RMB/Space was actually held.
+        private void TickCharge()
+        {
+            _charge = Mathf.Min(_charge + Time.deltaTime, _maxChargeSec);
+            OnChargeChanged?.Invoke(Mathf.Clamp01(_charge / _maxChargeSec));
         }
 
         // ── Move A: Rotate ──────────────────────────────────────────────────
@@ -251,6 +271,54 @@ namespace Biros.Input
             FinishTurn();
         }
 
+        // ── Trajectory Preview ──────────────────────────────────────────────
+        // Predicts the center-of-mass path only (a plain ballistic arc under
+        // gravity + linear drag). This is physically exact for the linear part —
+        // AddForceAtPosition gives the full force to linear velocity regardless of
+        // offset point; the offset only adds torque/spin on top, which doesn't
+        // change where the center of mass goes. So this preview doesn't need to
+        // know or care about tip/center/tail tap point, only current charge force.
+        // Uses the same integration Unity's own docs give for linear damping:
+        // velocity *= (1 - drag * dt).
+        private void UpdateTrajectoryPreview()
+        {
+            if (_trajectoryLine == null || _localPen?.Config == null || _localPen.PhysicsBody == null) return;
+
+            float frac     = Mathf.Clamp01(_charge / _maxChargeSec);
+            float minForce = _localPen.Config.maxFlickForce * _minForceFrac;
+            float force    = Mathf.Lerp(minForce, _localPen.Config.maxFlickForce, frac);
+
+            Vector3 launchDir = Quaternion.Euler(-_penV, _penH, 0f) * Vector3.forward;
+            float   mass      = _localPen.PhysicsBody.mass;
+            float   drag      = _localPen.PhysicsBody.drag;
+
+            Vector3 pos = _localPen.transform.position;
+            Vector3 vel = launchDir * (force / Mathf.Max(mass, 0.0001f));
+
+            var points = new List<Vector3>(_trajectorySamples) { pos };
+
+            for (int i = 0; i < _trajectorySamples; i++)
+            {
+                vel += Physics.gravity * _trajectoryTimeStep;
+                vel *= Mathf.Clamp01(1f - drag * _trajectoryTimeStep);
+                pos += vel * _trajectoryTimeStep;
+                points.Add(pos);
+
+                if (pos.y <= _deskSurfaceY) break;
+            }
+
+            _trajectoryLine.positionCount = points.Count;
+            _trajectoryLine.SetPositions(points.ToArray());
+            _trajectoryLine.enabled = true;
+        }
+
+        private void ClearTrajectoryPreview()
+        {
+            if (_trajectoryLine == null) return;
+            _trajectoryLine.enabled = false;
+            _trajectoryLine.positionCount = 0;
+        }
+
         // ── Move C: Spin ────────────────────────────────────────────────────
         // Space down → charge → Space release → spin in place.
         // Only available from Idle. NEVER from RotatingPen.
@@ -289,6 +357,7 @@ namespace Biros.Input
             _phase       = Phase.Idle;
             _charge      = 0f;
             _inputActive = false;
+            ClearTrajectoryPreview();
             OnChargeChanged?.Invoke(0f);
             OnTurnActionUsed?.Invoke();
             OnInputActiveChanged?.Invoke(false);
@@ -319,6 +388,7 @@ namespace Biros.Input
                 _inputActive = false;
                 _phase       = Phase.Idle;
                 _rotationAccumDeg = 0f;
+                ClearTrajectoryPreview();
                 OnChargeChanged?.Invoke(0f);
                 OnInputActiveChanged?.Invoke(false);
             }
