@@ -109,7 +109,14 @@ namespace Biros.Gameplay
         private void HandlePhaseChanged(MatchPhase prev, MatchPhase next)
         {
             if (!IsServer || _isOutOfBounds.Value) return;
-            bool simulate = next == MatchPhase.SimulatePhysics ||
+            // ExecuteFlick MUST be included here. SubmitFlickServerRpc sets isKinematic=false
+            // and queues AddForceAtPosition, then immediately calls ServerNotifyFlickSubmitted()
+            // which transitions the phase to ExecuteFlick. NetworkVariable.OnValueChanged fires
+            // synchronously on the server, so without ExecuteFlick in this list, isKinematic got
+            // set back to true in the same call stack — before PhysX ever got a FixedUpdate to
+            // actually apply the queued impulse. The force was silently discarded every time.
+            bool simulate = next == MatchPhase.ExecuteFlick ||
+                            next == MatchPhase.SimulatePhysics ||
                             next == MatchPhase.ResolveRound;
             _rb.isKinematic = !simulate;
         }
