@@ -33,6 +33,10 @@ namespace Biros.CameraSystem
 {
     public class CameraController : MonoBehaviour
     {
+        [Header("Feature Toggle")]
+        [Tooltip("Off by default. When off, the camera still follows/looks at the active pen (Cinemachine's own damping), but none of the manual orbit/zoom/auto-follow/reset code below runs — camera sits at whatever the FreeLook rig's Inspector-configured axis values are.")]
+        [SerializeField] private bool _enableOrbitControls = false;
+
         [Header("Cinemachine")]
         [SerializeField] private CinemachineFreeLook _freeLook;
 
@@ -108,7 +112,10 @@ namespace Biros.CameraSystem
                 _resetAction.action.performed -= OnResetPerformed;
         }
 
-        private void OnResetPerformed(InputAction.CallbackContext _) => BeginOverheadReset();
+        private void OnResetPerformed(InputAction.CallbackContext _)
+        {
+            if (_enableOrbitControls) BeginOverheadReset();
+        }
 
         private void Start()
         {
@@ -126,7 +133,7 @@ namespace Biros.CameraSystem
 
         private void LateUpdate()
         {
-            if (_freeLook == null) return;
+            if (_freeLook == null || !_enableOrbitControls) return;
 
             if (_autoFollowing)
                 TickAutoFollow();
@@ -220,7 +227,8 @@ namespace Biros.CameraSystem
         {
             _autoFollowing = next == MatchPhase.SimulatePhysics;
 
-            if (next == MatchPhase.ResolveRound || next == MatchPhase.SwitchPlayer)
+            if (_enableOrbitControls &&
+                (next == MatchPhase.ResolveRound || next == MatchPhase.SwitchPlayer))
                 BeginOverheadReset();
         }
 

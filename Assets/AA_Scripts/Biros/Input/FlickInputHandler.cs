@@ -1,18 +1,46 @@
-// FlickInputHandler.cs — v4
-// THE RULE: rotating = one move. flicking = one move. spinning = one move.
-// You cannot rotate and then flick in the same turn. Ever.
+﻿// FlickInputHandler.cs — v5 (simplified: drag-to-flick only)
 //
-// Turn flow options (mutually exclusive):
-//   A) LMB down on pen → drag to rotate → LMB release → turn consumed (SubmitRotateServerRpc)
-//   B) RMB down on pen → hold to charge → RMB release → turn consumed (SubmitFlickServerRpc)
-//   C) Space down      → hold to charge → Space release → turn consumed (SpinMoveServerRpc)
+// STRIPPED DOWN ON PURPOSE. Rotate move and Spin move still exist below but are
+// gated off by default via _enableRotateMove / _enableSpinMove — flip either to
+// true to bring them back once the core flick loop is confirmed solid. Camera
+// orbit controls have their own separate toggle over in CameraController.
 //
-// Accidental LMB tap safety: rotation only submits as a move if accumulated
-// rotation delta exceeds MIN_ROTATION_TO_COMMIT (degrees). Below that threshold,
-// LMB release just cancels back to Idle with no turn cost.
+// Flick is now click-and-drag, Angry-Birds style:
+//   RMB down  → anchor point recorded on the desk plane under the cursor
+//   drag      → trajectory line shows where the pen will go — in the OPPOSITE
+//               direction of the drag (pull back-left, pen flies forward-right),
+//               distance dragged sets force
+//   RMB up    → fires in that direction with that force
+//
+// TWO BUGS FIXED HERE THAT TOGETHER FULLY EXPLAIN "physics doesn't work,
+// nothing happens, turn just passes, and the trajectory line never showed":
+//
+//   1. _localPen used to come from PenRegistry.GetLocalPlayerPen(), which
+//      picks a pen by OwnerClientId alone. TestMatchBootstrap assigns BOTH
+//      pens the same clientId (the host) for solo testing — so that call
+//      always returned the SAME pen (whichever registered first), regardless
+//      of whose turn it actually was. Every other turn, _localPen pointed at
+//      a pen that wasn't even the active one.
+//   2. OnFlickStarted required the click to land within 90px of _localPen's
+//      screen position, or directly hit its collider, before it would even
+//      enter Phase.ChargingFlick. Combined with bug #1, or just from the pen
+//      being small on screen after the camera distance got widened, this
+//      gate silently failing meant Phase never left Idle — so the Update()
+//      switch's ChargingFlick case (which is what calls the trajectory-
+//      preview code) never ran at all. Explains both complaints as the same
+//      root cause, not two separate bugs to hunt down.
+//
+// Fix for #1: resolve _localPen from the CURRENTLY ACTIVE SLOT
+// (MatchStateManager.ActivePlayerSlot → PenRegistry.GetPenForSlot), only
+// treating it as "mine" if that pen's owner matches my client id. Correct
+// even with two same-owner pens, and also just the more correct definition
+// in general — you should only ever be acting on the active pen.
+// Fix for #2: removed the near-pen requirement entirely. Click anywhere,
+// drag, release — no need to precisely hit a small 3D model.
 
 using System;
 using System.Collections.Generic;
+using Unity.Netcode;
 using UnityEngine;
 using UnityEngine.InputSystem;
 using Biros.Core;
@@ -22,74 +50,86 @@ namespace Biros.Input
 {
     public class FlickInputHandler : MonoBehaviour
     {
+        [Header("Feature Toggles — off by default, flip on to bring a move back")]
+        [SerializeField] private bool _enableRotateMove = false;
+        [SerializeField] private bool _enableSpinMove   = false;
+
         [Header("Trajectory Preview")]
-        [Tooltip("LineRenderer that draws the predicted flight path while charging a flick. Needs a material assigned (e.g. Sprites-Default) or it renders invisible/pink.")]
+        [Tooltip("LineRenderer that draws the predicted flight path while dragging. Needs a material assigned (e.g. Sprites-Default) or it renders invisible/pink.")]
         [SerializeField] private LineRenderer _trajectoryLine;
-        [SerializeField] private int _trajectorySamples = 30;
+        [SerializeField] private int   _trajectorySamples = 30;
         [SerializeField] private float _trajectoryTimeStep = 0.04f;
-        [Tooltip("Y position the desk surface sits at — the preview stops once it would hit this.")]
+        [SerializeField] private float _trajectoryWidth = 0.015f;
+        [Tooltip("Y position the desk surface sits at — drag is measured on this plane, and the preview stops once it would hit it.")]
         [SerializeField] private float _deskSurfaceY = 0.05f;
 
         [Header("Input Actions")]
-        [SerializeField] private InputActionReference _selectAction;       // LMB — rotate move
+        [SerializeField] private InputActionReference _selectAction;       // LMB — rotate move (off by default)
         [SerializeField] private InputActionReference _mouseDelta;         // Mouse Delta
         [SerializeField] private InputActionReference _mousePosition;      // Mouse Position
-        [SerializeField] private InputActionReference _flickChargeAction;  // RMB — flick move
-        [SerializeField] private InputActionReference _spinMoveAction;     // Space — spin move
+        [SerializeField] private InputActionReference _flickChargeAction;  // RMB — flick move (drag)
+        [SerializeField] private InputActionReference _spinMoveAction;     // Space — spin move (off by default)
 
-        [Header("Rotation")]
+        [Header("Rotation (only used if _enableRotateMove)")]
         [SerializeField] private float _hSens = 0.45f;
         [SerializeField] private float _vSens = 0.30f;
         [SerializeField] private float _minTilt = 0f;
         [SerializeField] private float _maxTilt = 85f;
-        [Tooltip("Minimum total rotation in degrees before LMB release submits it as a move. " +
-                 "Prevents accidental taps from wasting a turn.")]
         [SerializeField] private float _minRotationToCommit = 5f;
 
-        [Header("Flick Charge")]
-        [SerializeField] private float _maxChargeSec = 1.5f;
+        [Header("Drag-to-Flick (Angry Birds style)")]
+        [Tooltip("Force applied even for a near-zero drag, as a fraction of maxFlickForce.")]
         [SerializeField] private float _minForceFrac = 0.15f;
+        [Tooltip("World units of drag distance -> extra force above the minimum. Placeholder — tune by feel.")]
+        [SerializeField] private float _dragForceScale = 8f;
 
-        [Header("Spin Move")]
+        [Header("Spin Move (only used if _enableSpinMove)")]
+        [SerializeField] private float _maxChargeSec = 1.5f;
         [SerializeField] private float _spinForceMultiplier = 1.4f;
-
-        [Header("Selection")]
-        [SerializeField] private float _clickRadiusPx = 90f;
 
         [Header("Network Rate")]
         [SerializeField] private float _orientHz = 20f;
 
         // ── Events ─────────────────────────────────────────────────────────
-        /// <summary>0 = not charging, 1 = full. Fires during flick and spin charge phases.</summary>
         public event Action<float> OnChargeChanged;
-        /// <summary>Fires when any move action is submitted (turn consumed).</summary>
         public event Action        OnTurnActionUsed;
         public event Action<bool>  OnInputActiveChanged;
 
         // ── State Machine ──────────────────────────────────────────────────
-        // These three phases are completely exclusive — you enter exactly one per turn.
         private enum Phase { Idle, RotatingPen, ChargingFlick, ChargingSpinMove }
         private Phase _phase = Phase.Idle;
 
         private PenController _localPen;
         private bool          _inputActive;
 
-        // Rotation state
+        // Rotation state (only relevant if _enableRotateMove)
         private float _penH;
         private float _penV;
-        private float _rotationAccumDeg;   // tracks total rotation this turn for commit threshold
+        private float _rotationAccumDeg;
         private float _lastSendT;
 
-        // Charge state (shared between flick and spin)
+        // Spin charge state (only relevant if _enableSpinMove)
         private float _charge;
 
-        // Flick-specific
-        private float _flickOffsetNorm;    // -0.5 = tail, 0 = center, 0.5 = tip
+        // Drag-flick state
+        private Vector3 _dragStartWorld;
+        private Vector3 _currentLaunchDir;
+        private float   _currentForce;
 
         private Camera _cam;
 
         // ── Unity ──────────────────────────────────────────────────────────
-        private void Awake() => _cam = Camera.main;
+        private void Awake()
+        {
+            _cam = Camera.main;
+            if (_trajectoryLine != null)
+            {
+                _trajectoryLine.startWidth = _trajectoryWidth;
+                _trajectoryLine.endWidth   = _trajectoryWidth;
+                _trajectoryLine.enabled    = false;
+                _trajectoryLine.useWorldSpace = true;
+            }
+        }
 
         private void OnEnable()
         {
@@ -140,14 +180,14 @@ namespace Biros.Input
         private void Start()
         {
             if (MatchStateManager.Instance == null) return;
-            MatchStateManager.Instance.OnPhaseChanged       += OnMatchPhaseChanged;
+            MatchStateManager.Instance.OnPhaseChanged        += OnMatchPhaseChanged;
             MatchStateManager.Instance.OnActivePlayerChanged += OnActivePlayerChanged;
         }
 
         private void OnDestroy()
         {
             if (MatchStateManager.Instance == null) return;
-            MatchStateManager.Instance.OnPhaseChanged       -= OnMatchPhaseChanged;
+            MatchStateManager.Instance.OnPhaseChanged        -= OnMatchPhaseChanged;
             MatchStateManager.Instance.OnActivePlayerChanged -= OnActivePlayerChanged;
         }
 
@@ -157,32 +197,33 @@ namespace Biros.Input
 
             switch (_phase)
             {
-                case Phase.RotatingPen:      TickRotate(); break;
-                case Phase.ChargingFlick:    TickCharge(); UpdateTrajectoryPreview(); break;
-                case Phase.ChargingSpinMove: TickCharge(); break;
+                case Phase.RotatingPen:      if (_enableRotateMove) TickRotate();  break;
+                case Phase.ChargingFlick:    TickDragFlick(); break;
+                case Phase.ChargingSpinMove: if (_enableSpinMove)   TickCharge();  break;
             }
         }
 
-        // This didn't exist before — the switch cases above called it but the method
-        // itself was never written, which is presumably why the cases got commented out
-        // rather than left as a compile error. _charge was permanently stuck at 0, so
-        // every flick/spin fired at exactly _minForceFrac of max force regardless of
-        // how long RMB/Space was actually held.
-        private void TickCharge()
+        // ── Pen resolution — THE bug fix ─────────────────────────────────────
+        private PenController ResolveMyActivePen()
         {
-            _charge = Mathf.Min(_charge + Time.deltaTime, _maxChargeSec);
-            OnChargeChanged?.Invoke(Mathf.Clamp01(_charge / _maxChargeSec));
+            if (MatchStateManager.Instance == null || PenRegistry.Instance == null) return null;
+            if (NetworkManager.Singleton == null) return null;
+
+            int activeSlot = MatchStateManager.Instance.ActivePlayerSlot;
+            PenController activePen = PenRegistry.Instance.GetPenForSlot(activeSlot);
+            if (activePen == null) return null;
+
+            return activePen.OwnerClientId == NetworkManager.Singleton.LocalClientId
+                ? activePen
+                : null;
         }
 
-        // ── Move A: Rotate ──────────────────────────────────────────────────
-        // LMB down → start rotating. LMB release → auto-submit if enough was rotated.
-        // CANNOT transition to flick from inside RotatingPen. Period.
-
+        // ── Move A: Rotate (off by default) ─────────────────────────────────
         private void OnSelectStarted(InputAction.CallbackContext _)
         {
+            if (!_enableRotateMove) return;
             if (!_inputActive || _localPen == null) return;
-            if (_phase != Phase.Idle) return;           // already doing something this turn
-            if (!IsNearPen(ReadMousePos())) return;
+            if (_phase != Phase.Idle) return;
 
             _rotationAccumDeg = 0f;
             _phase            = Phase.RotatingPen;
@@ -193,15 +234,9 @@ namespace Biros.Input
             if (_phase != Phase.RotatingPen) return;
 
             if (_rotationAccumDeg >= _minRotationToCommit)
-            {
-                // Significant rotation happened — this IS the player's move
                 SubmitRotateAsMove();
-            }
             else
-            {
-                // Accidental tap, too small to count — give the turn back
                 _phase = Phase.Idle;
-            }
 
             _rotationAccumDeg = 0f;
         }
@@ -218,7 +253,6 @@ namespace Biros.Input
             _penV -= dV;
             _penV  = Mathf.Clamp(_penV, _minTilt, _maxTilt);
 
-            // Accumulate total rotation so OnSelectCanceled can decide if it counts as a move
             _rotationAccumDeg += Mathf.Abs(dH) + Mathf.Abs(dV);
 
             if (Time.time - _lastSendT >= 1f / _orientHz)
@@ -234,24 +268,43 @@ namespace Biros.Input
             FinishTurn();
         }
 
-        // ── Move B: Flick ───────────────────────────────────────────────────
-        // RMB down → detect point on pen → charge → RMB release → flick.
-        // Only available from Idle. NEVER from RotatingPen.
-
+        // ── Move B: Flick — click and drag, Angry Birds style ───────────────
         private void OnFlickStarted(InputAction.CallbackContext _)
         {
             if (!_inputActive || _localPen == null) return;
-            if (_phase != Phase.Idle) return;           // THE rule: must be idle, not mid-rotation
+            if (_phase != Phase.Idle) return;
 
-            Vector2 mousePos = ReadMousePos();
+            if (!TryGetDeskPlanePoint(ReadMousePos(), out _dragStartWorld)) return;
 
-            // Require the click to be reasonably near the pen
-            if (!IsNearPen(mousePos) && !IsDirectHitOnPen(mousePos)) return;
+            _currentLaunchDir = _localPen.transform.forward;
+            _currentForce     = _localPen.Config != null
+                ? _localPen.Config.maxFlickForce * _minForceFrac
+                : 0f;
 
-            _flickOffsetNorm = DetectPenHitOffset(mousePos);
-            _charge          = 0f;
-            _phase           = Phase.ChargingFlick;
+            _phase = Phase.ChargingFlick;
             OnChargeChanged?.Invoke(0f);
+        }
+
+        private void TickDragFlick()
+        {
+            if (_localPen?.Config == null) return;
+            if (!TryGetDeskPlanePoint(ReadMousePos(), out Vector3 currentWorld)) return;
+
+            Vector3 dragVec = currentWorld - _dragStartWorld;
+            dragVec.y = 0f;
+
+            float dragDist = dragVec.magnitude;
+            Vector3 launchDir = dragDist > 0.001f ? -dragVec.normalized : _localPen.transform.forward;
+
+            float minForce = _localPen.Config.maxFlickForce * _minForceFrac;
+            float force     = Mathf.Clamp(minForce + dragDist * _dragForceScale,
+                                          minForce, _localPen.Config.maxFlickForce);
+
+            _currentLaunchDir = launchDir;
+            _currentForce     = force;
+
+            OnChargeChanged?.Invoke(Mathf.InverseLerp(minForce, _localPen.Config.maxFlickForce, force));
+            UpdateTrajectoryPreview(launchDir, force);
         }
 
         private void OnFlickCanceled(InputAction.CallbackContext _)
@@ -261,39 +314,27 @@ namespace Biros.Input
 
         private void SubmitFlick()
         {
-            if (_localPen?.Config == null) return;
+            if (_localPen?.Config == null) { FinishTurn(); return; }
 
-            float frac     = Mathf.Clamp01(_charge / _maxChargeSec);
-            float minForce = _localPen.Config.maxFlickForce * _minForceFrac;
-            float force    = Mathf.Lerp(minForce, _localPen.Config.maxFlickForce, frac);
+            float hAngle = Mathf.Atan2(_currentLaunchDir.x, _currentLaunchDir.z) * Mathf.Rad2Deg;
 
-            _localPen.SubmitFlickServerRpc(_penH, _penV, force, _flickOffsetNorm);
+            _localPen.SubmitFlickServerRpc(hAngle, 0f, _currentForce, 0f);
             FinishTurn();
         }
 
         // ── Trajectory Preview ──────────────────────────────────────────────
-        // Predicts the center-of-mass path only (a plain ballistic arc under
-        // gravity + linear drag). This is physically exact for the linear part —
-        // AddForceAtPosition gives the full force to linear velocity regardless of
-        // offset point; the offset only adds torque/spin on top, which doesn't
-        // change where the center of mass goes. So this preview doesn't need to
-        // know or care about tip/center/tail tap point, only current charge force.
-        // Uses the same integration Unity's own docs give for linear damping:
-        // velocity *= (1 - drag * dt).
-        private void UpdateTrajectoryPreview()
+        private void UpdateTrajectoryPreview(Vector3 launchDir, float force)
         {
             if (_trajectoryLine == null || _localPen?.Config == null || _localPen.PhysicsBody == null) return;
 
-            float frac     = Mathf.Clamp01(_charge / _maxChargeSec);
-            float minForce = _localPen.Config.maxFlickForce * _minForceFrac;
-            float force    = Mathf.Lerp(minForce, _localPen.Config.maxFlickForce, frac);
+            float mass = _localPen.PhysicsBody.mass;
+            float drag = _localPen.PhysicsBody.drag;
 
-            Vector3 launchDir = Quaternion.Euler(-_penV, _penH, 0f) * Vector3.forward;
-            float   mass      = _localPen.PhysicsBody.mass;
-            float   drag      = _localPen.PhysicsBody.drag;
+            float appliedForce = Mathf.Clamp(force, 0.05f, _localPen.Config.maxFlickForce)
+                                  * _localPen.Config.flickForceMultiplier;
 
             Vector3 pos = _localPen.transform.position;
-            Vector3 vel = launchDir * (force / Mathf.Max(mass, 0.0001f));
+            Vector3 vel = launchDir.normalized * (appliedForce / Mathf.Max(mass, 0.0001f));
 
             var points = new List<Vector3>(_trajectorySamples) { pos };
 
@@ -319,14 +360,12 @@ namespace Biros.Input
             _trajectoryLine.positionCount = 0;
         }
 
-        // ── Move C: Spin ────────────────────────────────────────────────────
-        // Space down → charge → Space release → spin in place.
-        // Only available from Idle. NEVER from RotatingPen.
-
+        // ── Move C: Spin (off by default) ───────────────────────────────────
         private void OnSpinStarted(InputAction.CallbackContext _)
         {
+            if (!_enableSpinMove) return;
             if (!_inputActive || _localPen == null) return;
-            if (_phase != Phase.Idle) return;           // must be idle
+            if (_phase != Phase.Idle) return;
 
             _charge = 0f;
             _phase  = Phase.ChargingSpinMove;
@@ -338,9 +377,15 @@ namespace Biros.Input
             if (_phase == Phase.ChargingSpinMove) SubmitSpinMove();
         }
 
+        private void TickCharge()
+        {
+            _charge = Mathf.Min(_charge + Time.deltaTime, _maxChargeSec);
+            OnChargeChanged?.Invoke(Mathf.Clamp01(_charge / _maxChargeSec));
+        }
+
         private void SubmitSpinMove()
         {
-            if (_localPen?.Config == null) return;
+            if (_localPen?.Config == null) { FinishTurn(); return; }
 
             float frac     = Mathf.Clamp01(_charge / _maxChargeSec);
             float minForce = _localPen.Config.maxFlickForce * _minForceFrac;
@@ -368,7 +413,7 @@ namespace Biros.Input
         {
             if (next == MatchPhase.ActiveTurnInput)
             {
-                _localPen    = PenRegistry.Instance?.GetLocalPlayerPen();
+                _localPen    = ResolveMyActivePen();
                 _inputActive = MatchStateManager.Instance.IsLocalPlayerTurn;
                 _phase       = Phase.Idle;
                 _charge      = 0f;
@@ -400,54 +445,21 @@ namespace Biros.Input
                 OnMatchPhaseChanged(MatchPhase.ActiveTurnInput, MatchPhase.ActiveTurnInput);
         }
 
-        // ── Flick Point Detection ───────────────────────────────────────────
-        private float DetectPenHitOffset(Vector2 screenPos)
+        // ── Helpers ────────────────────────────────────────────────────────
+        private bool TryGetDeskPlanePoint(Vector2 screenPos, out Vector3 worldPoint)
         {
-            if (_cam == null || _localPen == null) return 0f;
+            worldPoint = default;
+            if (_cam == null) return false;
 
-            Ray ray      = _cam.ScreenPointToRay(screenPos);
-            Collider col = _localPen.GetComponent<Collider>();
+            var plane = new Plane(Vector3.up, new Vector3(0f, _deskSurfaceY, 0f));
+            Ray ray = _cam.ScreenPointToRay(screenPos);
 
-            if (col != null && col.Raycast(ray, out RaycastHit hit, 100f))
+            if (plane.Raycast(ray, out float distance))
             {
-                Vector3 local   = _localPen.transform.InverseTransformPoint(hit.point);
-                float   halfLen = _localPen.PenLength * 0.5f;
-                return Mathf.Clamp(local.z / halfLen, -1f, 1f) * 0.5f;
+                worldPoint = ray.GetPoint(distance);
+                return true;
             }
-
-            return ScreenSpaceHitOffset(screenPos);
-        }
-
-        private float ScreenSpaceHitOffset(Vector2 screenPos)
-        {
-            float   half   = _localPen.PenLength * 0.5f;
-            Vector3 fwd    = _localPen.transform.forward;
-            Vector3 center = _localPen.transform.position;
-
-            Vector2 tipScreen  = _cam.WorldToScreenPoint(center + fwd * half);
-            Vector2 tailScreen = _cam.WorldToScreenPoint(center - fwd * half);
-            Vector2 line       = tipScreen - tailScreen;
-            float   lenSq      = line.sqrMagnitude;
-
-            if (lenSq < 1f) return 0f;
-
-            float t = Vector2.Dot(screenPos - tailScreen, line) / lenSq;
-            return Mathf.Clamp01(t) - 0.5f;
-        }
-
-        private bool IsDirectHitOnPen(Vector2 screenPos)
-        {
-            if (_cam == null || _localPen == null) return false;
-            Collider col = _localPen.GetComponent<Collider>();
-            if (col == null) return false;
-            return col.Raycast(_cam.ScreenPointToRay(screenPos), out _, 100f);
-        }
-
-        private bool IsNearPen(Vector2 screenPos)
-        {
-            if (_localPen == null || _cam == null) return false;
-            Vector2 penScreen = _cam.WorldToScreenPoint(_localPen.transform.position);
-            return Vector2.Distance(screenPos, penScreen) <= _clickRadiusPx;
+            return false;
         }
 
         private Vector2 ReadMousePos() =>
