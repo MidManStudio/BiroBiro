@@ -22,6 +22,10 @@ namespace Biros.Core
         [SerializeField] private float _settleGracePeriod = 0.5f;
         [SerializeField] private float _settleMaxWait = 8f;
 
+        [Header("Replay")]
+        [Tooltip("How long the whole match stays frozen after a knockout — every pen's physics, the turn timer, settle polling, all of it. Needs to comfortably cover however long the client-side rewind-replay actually takes to play (ReplayController's window/speed), plus a little buffer.")]
+        [SerializeField] private float _replayHoldSeconds = 7.5f;
+
         // ── Replicated ─────────────────────────────────────────────────────
         private NetworkVariable<MatchPhase> _phase = new(
             MatchPhase.None,
@@ -38,17 +42,29 @@ namespace Biros.Core
             NetworkVariableReadPermission.Everyone,
             NetworkVariableWritePermission.Server);
 
+        private NetworkVariable<bool> _replayPause = new(
+            false,
+            NetworkVariableReadPermission.Everyone,
+            NetworkVariableWritePermission.Server);
+
         // ── Server-only ────────────────────────────────────────────────────
         private List<ulong> _playerClientIds = new();
         private CountdownTimer _turnTimer;
         private NetworkTimer _settlePoller;
         private float _settleGraceAccum;
         private float _settleMaxAccum;
+        private Coroutine _replayPauseCoroutine;
 
         // ── Events ─────────────────────────────────────────────────────────
         public event Action<MatchPhase, MatchPhase> OnPhaseChanged;
         public event Action<int> OnActivePlayerChanged;
         public event Action<ulong> OnMatchOver;
+        // Fires on every peer (server and clients) whenever the pause state
+        // changes — true = just paused (a knockout happened, replay should
+        // start), false = just resumed. This is what ReplayController listens
+        // to, not any individual pen's IsOutOfBounds — the server is what
+        // actually owns freezing the match, this just observes that.
+        public event Action<bool> OnReplayPauseChanged;
 
         // ── Accessors ──────────────────────────────────────────────────────
         public MatchPhase CurrentPhase => _phase.Value;
@@ -70,11 +86,15 @@ namespace Biros.Core
                 ? Mathf.Clamp01(_turnTimer.Progress / _turnDurationSeconds)
                 : 0f;
 
+        public bool  IsPausedForReplay => _replayPause.Value;
+        public float ReplayHoldSeconds => _replayHoldSeconds;
+
         // ── INetworkSingletonLifecycle ─────────────────────────────────────
         public void OnNetworkSpawned(bool isServer, bool isHost, bool isClient, bool isOwner)
         {
             _phase.OnValueChanged += HandlePhaseChanged;
             _activePlayerSlot.OnValueChanged += HandleActivePlayerChanged;
+            _replayPause.OnValueChanged += HandleReplayPauseChanged;
 
             if (!isServer) return;
 
@@ -87,6 +107,7 @@ namespace Biros.Core
         {
             _phase.OnValueChanged -= HandlePhaseChanged;
             _activePlayerSlot.OnValueChanged -= HandleActivePlayerChanged;
+            _replayPause.OnValueChanged -= HandleReplayPauseChanged;
             _turnTimer?.Stop();
         }
 
@@ -96,6 +117,7 @@ namespace Biros.Core
         private void Update()
         {
             if (!IsServer) return;
+            if (_replayPause.Value) return; // fully frozen — see ServerOnPenExitedBounds
 
             _turnTimer.Tick(Time.deltaTime);
 
@@ -147,7 +169,31 @@ public void ServerNotifyRotateSubmitted()
         /// Called by PenController when a pen falls out of bounds.
         /// Hook point for future scoring / VFX coordination.
         /// </summary>
-        public void ServerOnPenExitedBounds(ulong ownerClientId) { /* scoring hook */ }
+        /// <summary>
+        /// Called by PenController when a pen falls out of bounds. Freezes the
+        /// whole match — turn timer, settle polling, and (via
+        /// OnReplayPauseChanged, which every PenController also listens to)
+        /// every remaining pen's physics — for _replayHoldSeconds, giving
+        /// clients a stable window to play their local rewind-replay. If a
+        /// second pen goes out during an already-active hold, this restarts
+        /// the timer rather than stacking a second one.
+        /// </summary>
+        public void ServerOnPenExitedBounds(ulong ownerClientId)
+        {
+            if (!IsServer) return;
+
+            _replayPause.Value = true;
+
+            if (_replayPauseCoroutine != null) StopCoroutine(_replayPauseCoroutine);
+            _replayPauseCoroutine = StartCoroutine(ServerReplayHoldThenResume());
+        }
+
+        private IEnumerator ServerReplayHoldThenResume()
+        {
+            yield return new WaitForSeconds(_replayHoldSeconds);
+            _replayPause.Value = false;
+            _replayPauseCoroutine = null;
+        }
 
         // ── State Machine ──────────────────────────────────────────────────
         private void ServerTransitionTo(MatchPhase next)
@@ -260,5 +306,8 @@ public void ServerNotifyRotateSubmitted()
 
         private void HandleActivePlayerChanged(int prev, int next) =>
             OnActivePlayerChanged?.Invoke(next);
+
+        private void HandleReplayPauseChanged(bool prev, bool next) =>
+            OnReplayPauseChanged?.Invoke(next);
     }
 }

@@ -77,7 +77,10 @@ namespace Biros.Gameplay
             {
                 if (_config != null) ApplyConfig();
                 if (MatchStateManager.Instance != null)
-                    MatchStateManager.Instance.OnPhaseChanged += HandlePhaseChanged;
+                {
+                    MatchStateManager.Instance.OnPhaseChanged        += HandlePhaseChanged;
+                    MatchStateManager.Instance.OnReplayPauseChanged  += HandleReplayPauseChanged;
+                }
             }
         }
 
@@ -86,7 +89,10 @@ namespace Biros.Gameplay
             base.OnNetworkDespawn();
             PenRegistry.Instance?.Unregister(this);
             if (IsServer && MatchStateManager.Instance != null)
-                MatchStateManager.Instance.OnPhaseChanged -= HandlePhaseChanged;
+            {
+                MatchStateManager.Instance.OnPhaseChanged       -= HandlePhaseChanged;
+                MatchStateManager.Instance.OnReplayPauseChanged -= HandleReplayPauseChanged;
+            }
         }
 
         private void FixedUpdate()
@@ -105,19 +111,31 @@ namespace Biros.Gameplay
             ApplyConfig();
         }
 
-        // ── Phase: kinematic toggle ────────────────────────────────────────
-        private void HandlePhaseChanged(MatchPhase prev, MatchPhase next)
+        // ── Phase / Pause: kinematic toggle ─────────────────────────────────
+        private void HandlePhaseChanged(MatchPhase prev, MatchPhase next) => RecomputeKinematic();
+
+        // Pausing for a replay does NOT change _phase.Value — that's the whole
+        // point, the match freezes exactly where it was so it can resume from
+        // there. Which means HandlePhaseChanged alone never fires when a pause
+        // starts or ends. This is the hook that actually catches that.
+        private void HandleReplayPauseChanged(bool paused) => RecomputeKinematic();
+
+        private void RecomputeKinematic()
         {
             if (!IsServer || _isOutOfBounds.Value) return;
+            if (MatchStateManager.Instance == null) return;
+
             // ExecuteFlick MUST be included here. SubmitFlickServerRpc sets isKinematic=false
             // and queues AddForceAtPosition, then immediately calls ServerNotifyFlickSubmitted()
             // which transitions the phase to ExecuteFlick. NetworkVariable.OnValueChanged fires
             // synchronously on the server, so without ExecuteFlick in this list, isKinematic got
             // set back to true in the same call stack — before PhysX ever got a FixedUpdate to
             // actually apply the queued impulse. The force was silently discarded every time.
-            bool simulate = next == MatchPhase.ExecuteFlick ||
-                            next == MatchPhase.SimulatePhysics ||
-                            next == MatchPhase.ResolveRound;
+            MatchPhase phase = MatchStateManager.Instance.CurrentPhase;
+            bool simulate = !MatchStateManager.Instance.IsPausedForReplay &&
+                            (phase == MatchPhase.ExecuteFlick ||
+                             phase == MatchPhase.SimulatePhysics ||
+                             phase == MatchPhase.ResolveRound);
             _rb.isKinematic = !simulate;
         }
 
